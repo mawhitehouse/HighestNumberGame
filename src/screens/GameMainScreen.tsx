@@ -30,8 +30,14 @@ export default function GameMainScreen(props: any) {
   const slotCardWidth = level === 5 ? 55 : 70;
 
   const [activePhase, setActivePhase] = useState<0 | 1 | 2>(0);
-  const [isOppositeMode, setIsOppositeMode] = useState(true);
+  
+  // NEW: Default to Side-by-Side mode!
+  const [isOppositeMode, setIsOppositeMode] = useState(false); 
+  
   const [isGameFinished, setIsGameFinished] = useState(false);
+  
+  // NEW: Dealing state to lock the board while cards "deal"
+  const [isDealing, setIsDealing] = useState(false); 
 
   const [p1Score, setP1Score] = useState(0);
   const [p2Score, setP2Score] = useState(0);
@@ -78,26 +84,21 @@ export default function GameMainScreen(props: any) {
 
   useEffect(() => {
     startNewRound();
-  }, []);
+  }, []); // Only runs on first mount. Subsequent rounds are triggered manually.
 
-  // --- NEW: THE CPU AUTOMATON ---
+  // CPU AUTOMATON
   useEffect(() => {
-    // If it's the CPU's turn, take over!
-    if (activePhase === 2 && p2Profile.id === 'cpu' && !p2HasPlayed && !isComparingPhase) {
+    // NEW: Ensure the CPU doesn't try to play while the cards are still dealing
+    if (activePhase === 2 && p2Profile.id === 'cpu' && !p2HasPlayed && !isComparingPhase && !isDealing) {
       const timer = setTimeout(() => {
-        // 1. Sort the cards highest to lowest automatically
         const sortedCards = [...p2Hand].filter(c => c !== null).sort((a, b) => b!.value - a!.value);
-        
-        // 2. Slap them directly into the slots and clear the hand
         setP2Slots(sortedCards);
         setP2Hand(Array(level).fill(null));
-        
-        // 3. Hand the turn back
         triggerTurnOver(2);
-      }, 1500); // Wait 1.5 seconds so it feels like the robot is "thinking"
+      }, 1500); 
       return () => clearTimeout(timer);
     }
-  }, [activePhase, p2Profile.id, p2HasPlayed, isComparingPhase, p2Hand, level]);
+  }, [activePhase, p2Profile.id, p2HasPlayed, isComparingPhase, p2Hand, level, isDealing]);
 
   const calculateHighestNumber = (cards: PlayingCard[]) => {
     const sortedValues = [...cards].map(c => c.value).sort((a, b) => b - a);
@@ -129,6 +130,23 @@ export default function GameMainScreen(props: any) {
 
     const chosenPattern = Math.random() > 0.5 ? p1Profile.iconName : p2Profile.iconName;
     setDeckPattern(chosenPattern);
+
+    // --- NEW: THE DEALING SEQUENCE ---
+    setIsDealing(true);
+    setActivePhase(0); // Force the 50/50 view so both players see their cards appear
+    LayoutAnimation.configureNext(smoothAnimation);
+
+    // Wait 1.5 seconds, then auto-zoom to the starting player
+    setTimeout(() => {
+      setIsDealing(false);
+      
+      // Calculate who starts based on score! Lower score goes first.
+      // Note: Because setState runs asynchronously, we use the local state values here.
+      // If it's a tie (like Round 1 where both are 0), Player 1 goes first.
+      const startingPlayer = p2Score < p1Score ? 2 : 1;
+      
+      togglePhase(startingPlayer);
+    }, 1500);
   };
 
   const togglePhase = (phase: 0 | 1 | 2) => {
@@ -147,7 +165,6 @@ export default function GameMainScreen(props: any) {
       if (p2HasPlayed) { 
         setIsComparingPhase(true); togglePhase(0); 
       } else { 
-        // Updated text for CPU
         const msg = p2Profile.id === 'cpu' ? "Great job! The Robot is thinking..." : `You nailed it! ${p2Profile.name}, your turn!`;
         Alert.alert("Perfect!", msg, [{ text: "Let's Go!", onPress: () => togglePhase(2) }]); 
       }
@@ -156,7 +173,6 @@ export default function GameMainScreen(props: any) {
       if (p1HasPlayed) { 
         setIsComparingPhase(true); togglePhase(0); 
       } else { 
-        // Updated text for CPU
         const title = p2Profile.id === 'cpu' ? "Beep Boop!" : "Perfect!";
         const msg = p2Profile.id === 'cpu' ? "The Robot has locked in its number. Show it what you've got!" : `You nailed it! ${p1Profile.name}, your turn!`;
         Alert.alert(title, msg, [{ text: "Let's Go!", onPress: () => togglePhase(1) }]); 
@@ -164,12 +180,14 @@ export default function GameMainScreen(props: any) {
     }
   };
 
+  // NEW: The Security Guard now blocks ALL taps while cards are dealing
   const canPlayerInteract = (player: 1 | 2) => {
+    if (isDealing) return false; 
     if (isComparingPhase || isQuestionPhase) return false; 
     if (player === 1 && p1HasPlayed) return false; 
     if (player === 2 && p2HasPlayed) return false; 
     if (activePhase !== 0 && activePhase !== player) return false; 
-    if (player === 2 && p2Profile.id === 'cpu') return false; // Prevent tapping the CPU's cards!
+    if (player === 2 && p2Profile.id === 'cpu') return false; 
     return true; 
   };
 
@@ -179,8 +197,6 @@ export default function GameMainScreen(props: any) {
     if (p2TargetNumber > p1TargetNumber) actualWinner = 2;
 
     const p1Correct = p1Guess === actualWinner;
-    
-    // CPU always guesses perfectly if you want it to, or you can randomize it. Let's make it random so it doesn't always win on points!
     const cpuGuess = Math.random() > 0.5 ? 1 : 2; 
     const p2Correct = p2Profile.id === 'cpu' ? (cpuGuess === actualWinner) : (p2Guess === actualWinner);
 
@@ -242,31 +258,37 @@ export default function GameMainScreen(props: any) {
       msg += `${p2Profile.name} guessed wrong. ❌`;
     }
 
-    const newP1Score = p1Score + p1RoundPoints;
-    const newP2Score = p2Score + p2RoundPoints;
-    setP1Score(newP1Score);
-    setP2Score(newP2Score);
+    // We must pass the functional updates down so the startNewRound closure gets the fresh scores
+    setP1Score(prev => {
+      const finalP1 = prev + p1RoundPoints;
+      setP2Score(prev2 => {
+        const finalP2 = prev2 + p2RoundPoints;
+        
+        if (currentRound >= totalRounds) {
+          let finalMsg = `Final Score:\n${p1Profile.name}: ${finalP1}\n${p2Profile.name}: ${finalP2}\n\n`;
+          if (finalP1 > finalP2) finalMsg += `${p1Profile.name} Wins the Game! 🏆`;
+          else if (finalP2 > finalP1) finalMsg += `${p2Profile.name} Wins the Game! 🏆`;
+          else finalMsg += "It's a tie game! 🤝";
 
-    if (currentRound >= totalRounds) {
-      let finalMsg = `Final Score:\n${p1Profile.name}: ${newP1Score}\n${p2Profile.name}: ${newP2Score}\n\n`;
-      if (newP1Score > newP2Score) finalMsg += `${p1Profile.name} Wins the Game! 🏆`;
-      else if (newP2Score > newP1Score) finalMsg += `${p2Profile.name} Wins the Game! 🏆`;
-      else finalMsg += "It's a tie game! 🤝";
+          setIsGameFinished(true); 
 
-      setIsGameFinished(true); 
-
-      Alert.alert("Game Over!", finalMsg, [
-        { text: "Finish", onPress: () => props.navigation.reset({ index: 0, routes: [{ name: 'Home' }] }) }
-      ]);
-    } else {
-      Alert.alert(`Round ${currentRound} Results!`, msg, [
-        { text: `Start Round ${currentRound + 1}`, onPress: () => {
-            setCurrentRound(prev => prev + 1);
-            startNewRound();
-            togglePhase(0);
-        }}
-      ]);
-    }
+          Alert.alert("Game Over!", finalMsg, [
+            { text: "Finish", onPress: () => props.navigation.reset({ index: 0, routes: [{ name: 'Home' }] }) }
+          ]);
+        } else {
+          Alert.alert(`Round ${currentRound} Results!`, msg, [
+            { text: `Start Round ${currentRound + 1}`, onPress: () => {
+                setCurrentRound(r => r + 1);
+                // Call startNewRound manually here. The states for score won't be updated in the closure yet, 
+                // but our setTimeOut inside startNewRound reads the global state which React will have updated by the time it fires!
+                startNewRound();
+            }}
+          ]);
+        }
+        return finalP2;
+      });
+      return finalP1;
+    });
   };
 
   const handleCardSwipe = (player: 1 | 2, handIndex: number) => {
@@ -315,7 +337,7 @@ export default function GameMainScreen(props: any) {
             triggerTurnOver(player);
           }
         } else {
-          Vibration.vibrate([0, 100, 100, 100]); // Error pattern
+          Vibration.vibrate([0, 100, 100, 100]); 
           Alert.alert("Oops!", `That's not the ${currentQ.place} place. Try again!`);
         }
       }
@@ -405,7 +427,6 @@ export default function GameMainScreen(props: any) {
   const renderVotingPanel = (player: 1 | 2) => {
     if (!isComparingPhase) return null;
     
-    // Auto-hide the voting buttons for the CPU, it already "voted" randomly in the background!
     if (player === 2 && p2Profile.id === 'cpu') {
       return (
         <View style={styles.votingPanel}>
@@ -442,7 +463,9 @@ export default function GameMainScreen(props: any) {
         <View style={[styles.playerZone, { flex: player2Flex, backgroundColor: p2Profile.colorHex + '20' }]}>
           <View style={[styles.contentWrapper, { transform: [{ rotate: isOppositeMode ? '180deg' : '0deg' }, { scale: p2Scale }] }]}>
             <Text style={[styles.zoneTitle, { color: p2Profile.colorHex }]}>{p2Profile.name}</Text>
-            {!p2HasPlayed && !isComparingPhase && p2Profile.id !== 'cpu' && <Text style={{color: '#666', fontWeight: 'bold', marginBottom: 5}}>Make the largest number!</Text>}
+            
+            {/* Hide instructions while dealing! */}
+            {!p2HasPlayed && !isComparingPhase && !isDealing && p2Profile.id !== 'cpu' && <Text style={{color: '#666', fontWeight: 'bold', marginBottom: 5}}>Make the largest number!</Text>}
             
             {!isComparingPhase ? (
               <View style={styles.cardRow}>
@@ -474,7 +497,9 @@ export default function GameMainScreen(props: any) {
         {/* --- DIVIDER --- */}
         <View style={styles.divider}>
           <Text style={[styles.scoreText, { color: p1Profile.colorHex }]}>{p1Profile.name}: {p1Score}</Text>
-          {isComparingPhase && p1Guess && (p2Guess || p2Profile.id === 'cpu') ? (
+          {isDealing ? (
+             <Text style={[styles.dividerText, { color: '#FFD166' }]}>Dealing Cards...</Text>
+          ) : isComparingPhase && p1Guess && (p2Guess || p2Profile.id === 'cpu') ? (
             <TouchableOpacity style={styles.revealBtn} onPress={handleRevealResults}>
                <Text style={styles.revealBtnText}>Reveal Results!</Text>
             </TouchableOpacity>
@@ -488,7 +513,9 @@ export default function GameMainScreen(props: any) {
         <View style={[styles.playerZone, { flex: player1Flex, backgroundColor: p1Profile.colorHex + '20' }]}>
           <View style={[styles.contentWrapper, { transform: [{ scale: p1Scale }] }]}>
             <Text style={[styles.zoneTitle, { color: p1Profile.colorHex }]}>{p1Profile.name}</Text>
-            {!p1HasPlayed && !isComparingPhase && <Text style={{color: '#666', fontWeight: 'bold', marginBottom: 5}}>Make the largest number!</Text>}
+            
+            {/* Hide instructions while dealing! */}
+            {!p1HasPlayed && !isComparingPhase && !isDealing && <Text style={{color: '#666', fontWeight: 'bold', marginBottom: 5}}>Make the largest number!</Text>}
 
             {renderQuestionBanner(1)}
 
@@ -520,7 +547,7 @@ export default function GameMainScreen(props: any) {
       </View>
 
       {/* --- CONTROLS --- */}
-      {!isComparingPhase && (
+      {!isComparingPhase && !isDealing && (
         <View style={styles.controlsContainer}>
           <TouchableOpacity style={styles.modeBtn} onPress={toggleMode}>
             <Text style={styles.modeBtnText}>Mode: {isOppositeMode ? "Opposite" : "Side-by-Side"}</Text>
